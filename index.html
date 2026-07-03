@@ -378,6 +378,11 @@
   <div class="view active" id="view-today">
     <p class="section-label" style="margin-top:16px;">Status</p>
     <div class="status-hero" id="statusHero"></div>
+    <div class="panel" id="migratePanel" style="margin-top:20px;display:none;">
+      <div style="font-weight:700;font-size:14.5px;margin-bottom:6px;">Move your saved check-ins here</div>
+      <p class="hint" style="margin-bottom:14px;">Found check-ins saved earlier on this browser, before this page was shared. One tap moves them into the shared trip everyone can see — safe to do even if you're not sure, it won't duplicate.</p>
+      <button class="btn-primary" onclick="migrateLocalCheckins()" id="migrateBtn">Move my check-ins to the shared trip</button>
+    </div>
     <p class="section-label">Conditions in Annecy</p>
     <div class="weather-strip" id="weatherStrip"></div>
     <p class="section-label">This week's training load</p>
@@ -892,14 +897,12 @@ function fmtKm(m){ return (m/1000).toFixed(1)+' km'; }
 function fmtKmh(ms){ return (ms*3.6).toFixed(1)+' km/h'; }
 
 async function loadStrava(dayId){
+  const day = DAYS.find(d=>d.id===dayId);
   try{
-    const res = await window.storage.get('strava:'+dayId);
-    if(res && res.value) return JSON.parse(res.value);
-  }catch(e){}
-  return null;
-}
-async function saveStrava(dayId, payload){
-  try{ await window.storage.set('strava:'+dayId, JSON.stringify(payload)); }catch(e){}
+    const res = await fetch(`/.netlify/functions/strava-cached?date=${isoDateFor(day)}`);
+    const data = await res.json();
+    return data || null;
+  }catch(e){ return null; }
 }
 
 async function initStrava(dayId){
@@ -923,7 +926,6 @@ async function syncStrava(dayId){
     const data = await res.json();
     if(data.error){ throw new Error(data.error); }
     const payload = { fetchedAt: new Date().toISOString(), activities: data.activities || [] };
-    await saveStrava(dayId, payload);
     renderStravaList(dayId, payload);
   }catch(e){
     listEl.innerHTML = `<p class="strava-empty">Couldn't reach Strava just now — tap Sync to try again. (${e.message||'connection issue'})</p>`;
@@ -971,13 +973,9 @@ async function autoSyncRecent(){
   for(const d of candidates){
     const cached = await loadStrava(d.id);
     if(!cached){
-      const iso = isoDateFor(d);
       try{
-        const res = await fetch(`/.netlify/functions/strava-activities?date=${iso}`);
-        const data = await res.json();
-        if(!data.error){
-          await saveStrava(d.id, { fetchedAt: new Date().toISOString(), activities: data.activities || [] });
-        }
+        await fetch(`/.netlify/functions/strava-activities?date=${isoDateFor(d)}`);
+        // backend caches this automatically — no client-side save needed
       }catch(e){ /* silent — manual Sync button on the day still works */ }
     }
   }
@@ -1022,13 +1020,36 @@ const composerPhotos = {}; // dayId -> array of {src}
 
 async function loadCheckins(dayId){
   try{
-    const res = await window.storage.get('checkins:'+dayId);
-    if(res && res.value) return JSON.parse(res.value);
-  }catch(e){}
-  return [];
+    const res = await fetch(`/.netlify/functions/checkins?day=${dayId}`);
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  }catch(e){ return []; }
 }
-async function saveCheckins(dayId, arr){
-  try{ await window.storage.set('checkins:'+dayId, JSON.stringify(arr)); }catch(e){}
+async function loadAllCheckins(){
+  try{
+    const res = await fetch('/.netlify/functions/checkins');
+    return await res.json();
+  }catch(e){ return {}; }
+}
+async function postCheckinToServer(dayId, checkin){
+  try{
+    const res = await fetch('/.netlify/functions/checkins', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dayId, checkin }),
+    });
+    return await res.json();
+  }catch(e){ return null; }
+}
+async function deleteCheckinFromServer(dayId, id){
+  try{
+    const res = await fetch('/.netlify/functions/checkins', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dayId, deleteId: id }),
+    });
+    return await res.json();
+  }catch(e){ return null; }
 }
 
 async function initCheckins(dayId){
@@ -1148,9 +1169,7 @@ async function postCheckin(dayId){
     timeLabel: now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}),
     mood, text, photos
   };
-  const arr = await loadCheckins(dayId);
-  arr.unshift(checkin);
-  await saveCheckins(dayId, arr);
+  const arr = await postCheckinToServer(dayId, checkin) || [];
   dayCheckinCounts[dayId] = arr.length;
 
   // reset composer + clear the draft now that it's been posted
@@ -1190,9 +1209,7 @@ function renderCheckinList(dayId, arr){
 }
 
 async function deleteCheckin(dayId, id){
-  let arr = await loadCheckins(dayId);
-  arr = arr.filter(c=>c.id!==id);
-  await saveCheckins(dayId, arr);
+  const arr = await deleteCheckinFromServer(dayId, id) || [];
   dayCheckinCounts[dayId] = arr.length;
   renderCheckinList(dayId, arr);
   document.getElementById('ci-count-'+dayId).textContent = arr.length ? `${arr.length} logged` : '';
@@ -1206,8 +1223,9 @@ async function renderJournal(){
   let dayGroups = [];
   let allPhotos = [];
 
+  const allData = await loadAllCheckins();
   for(const d of DAYS){
-    const arr = await loadCheckins(d.id);
+    const arr = allData[d.id] || [];
     dayCheckinCounts[d.id] = arr.length;
     if(arr.length){
       arr.forEach(c=>{
@@ -1434,11 +1452,45 @@ async function preloadStats(){
   }
 }
 async function preloadCheckinCounts(){
+  const allData = await loadAllCheckins();
   for(const d of DAYS){
-    const arr = await loadCheckins(d.id);
-    dayCheckinCounts[d.id] = arr.length;
+    dayCheckinCounts[d.id] = (allData[d.id] || []).length;
   }
 }
+async function checkForLocalDataToMigrate(){
+  let found = false;
+  for(const d of DAYS){
+    try{
+      const res = await window.storage.get('checkins:'+d.id);
+      if(res && res.value && JSON.parse(res.value).length){ found = true; break; }
+    }catch(e){}
+  }
+  if(found) document.getElementById('migratePanel').style.display = 'block';
+}
+
+async function migrateLocalCheckins(){
+  const btn = document.getElementById('migrateBtn');
+  btn.disabled = true;
+  btn.textContent = 'Moving your check-ins…';
+  let moved = 0;
+  for(const d of DAYS){
+    try{
+      const res = await window.storage.get('checkins:'+d.id);
+      if(res && res.value){
+        const localArr = JSON.parse(res.value);
+        for(const checkin of localArr){
+          await postCheckinToServer(d.id, checkin);
+          moved++;
+        }
+        await window.storage.delete('checkins:'+d.id); // avoid moving them again next time
+      }
+    }catch(e){}
+  }
+  btn.textContent = `Done — moved ${moved} check-in${moved!==1?'s':''} ✓`;
+  document.getElementById('migratePanel').style.display = 'none';
+  await init(); // refresh everything now that data lives on the server
+}
+
 async function init(){
   await loadTheme();
   await preloadStats();
@@ -1452,6 +1504,7 @@ async function init(){
   renderQuickStats();
   renderLoadChart('loadChartToday');
   autoSyncRecent(); // fire-and-forget, doesn't block initial render
+  checkForLocalDataToMigrate();
 }
 init();
 </script>
