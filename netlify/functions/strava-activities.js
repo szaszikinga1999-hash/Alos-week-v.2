@@ -14,7 +14,7 @@ exports.handler = async (event) => {
     };
   }
 
-  const store = getStore('strava-tokens');
+  const store = getStore({ name: 'strava-tokens', siteID: process.env.NETLIFY_SITE_ID, token: process.env.NETLIFY_API_TOKEN });
   const tokens = await store.get('tokens', { type: 'json' });
   if (!tokens || !tokens.refresh_token) {
     return {
