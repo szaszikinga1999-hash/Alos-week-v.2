@@ -70,6 +70,11 @@ exports.handler = async (event) => {
     max_speed_ms: a.max_speed,
   }));
 
+  // Cache this result for the shared strava-cached.js endpoint, so other
+  // visitors see it instantly without needing to click Sync themselves.
+  const cacheStore = getStore({ name: 'strava-cache', siteID: process.env.NETLIFY_SITE_ID, token: process.env.NETLIFY_API_TOKEN });
+  await cacheStore.setJSON(dateStr, { fetchedAt: new Date().toISOString(), activities: simplified });
+
   return {
     statusCode: 200,
     headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
