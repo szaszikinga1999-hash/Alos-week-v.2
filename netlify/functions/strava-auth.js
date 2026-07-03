@@ -31,7 +31,7 @@ exports.handler = async (event) => {
     return { statusCode: 500, body: 'Strava did not return a refresh token: ' + JSON.stringify(tokenData) };
   }
 
-  const store = getStore('strava-tokens');
+  const store = getStore({ name: 'strava-tokens', siteID: process.env.NETLIFY_SITE_ID, token: process.env.NETLIFY_API_TOKEN });
   await store.setJSON('tokens', {
     refresh_token: tokenData.refresh_token,
     access_token: tokenData.access_token,
